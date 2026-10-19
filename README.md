@@ -1,71 +1,48 @@
-# Render 私人 GLM-5 中转
+# Render 多模型私人中转
 
-链路：PWA → 现有 Cloudflare Worker → Render → Z.AI。
-真实 Z.AI Key 仅配置在 Render；前端 API Key 填中转密码。只允许 glm-5，固定请求 Z.AI 通用 API。
+支持的请求模型 ID：glm-5、glm-5.1、glm-5.2、kimi-k3、kimi-k2.6、kimi-k2.5。
+GLM 固定转发到 https://api.z.ai/api/paas/v4/chat/completions 。
+Kimi 固定转发到 https://api.moonshot.ai/v1/chat/completions 。
+模型 ID 按上述名单原样发送；不替换或降级模型。账户需要具备相应模型权限和余额。
+/v1/models 是本地配置列表，不代表厂商已验证模型可用，仅显示配置了 Key 的平台。
 
-## 1. 创建 Render 服务
+## 更新已有 Render 服务
 
-将本目录随工程提交并推送到自己的 GitHub 仓库。Render 控制台选择 New → Web Service，连接这个仓库。
+1. 把包里的 server.mjs、server.test.mjs、package.json、README.md 和 .gitignore 放入仓库原中转目录。package.json 必须使用此文件名，不要使用 package(1).json。
+2. Render → 现有服务 → Environment，设置：
 
-| 字段 | 填写 |
+| 变量 | 值 |
 | --- | --- |
-| Name | 自己取名，例如 telewindy-glm-relay |
-| Language | Node |
-| Root Directory | backend/zai-relay |
-| Build Command | npm install --omit=dev |
-| Start Command | npm start |
-| Instance Type | Free，先验证连通性 |
-| Health Check Path | /healthz |
+| ZAI_API_KEY | 真实 Z.AI Key |
+| MOONSHOT_API_KEY | 与 api.moonshot.ai 匹配的真实 Kimi Key |
+| RELAY_TOKEN | 保留原来至少 32 字符的随机中转密码 |
+| ALLOWED_ORIGINS | https://795799.xyz,https://www.795799.xyz，或你的实际前端 Origin |
 
-在 Environment Variables 添加：
+两个厂商 Key 都配置后会列出六个模型。也支持只配置一个平台。
+不要把真实厂商 Key 放到前端、仓库或聊天里。
+3. 推送代码并部署最新提交；修改变量后保存并部署。
+4. 沿用原 Root Directory（README 原示例为 backend/zai-relay，须与仓库实际目录一致）、Build Command `npm install --omit=dev`、Start Command `npm start`、Health Check Path `/healthz`。
+5. 日志出现 multi_model_relay_ready 表示启动成功。
 
-| Key | Value |
-| --- | --- |
-| ZAI_API_KEY | 你的真实 Z.AI API Key |
-| RELAY_TOKEN | 自己生成的至少 32 字符随机中转密码，与真实 Key 不同 |
-| ALLOWED_ORIGINS | https://795799.xyz,https://www.795799.xyz |
+## 前端设置
 
-ALLOWED_ORIGINS 用于浏览器直连。Worker 请求不携带 Origin，仍需中转密码。
-可用密码管理器生成随机密码，或在自己电脑的 PowerShell 执行以下命令，把结果仅填入 Render 和自己的前端预设：
+API URL：https://你的服务名.onrender.com/v1/chat/completions
+API Key：RELAY_TOKEN 的值。
+模型：从上方六个完整 ID 中选择，注意 GLM 名称包含连字符，例如 glm-5.1。
+六个预设可以共用同一个 URL 和中转密码。模型列表接口为 GET /v1/models，需 Bearer 中转密码。
+现有 Worker 如果原先支持传递 URL、Key、model，可继续沿用；本包不包含 Worker，未验证其实现。
 
-```powershell
-[guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
-```
+先逐个模型发送简单消息验证账户权限和连通性。本地测试使用假上游，不调用真实模型。
+/healthz 只表示进程在线。厂商返回的模型不存在、余额不足、权限等错误会原样转发。
 
-点击 Deploy Web Service，等待出现 zai_relay_ready。记录 Render 给出的 https://你的服务名.onrender.com 地址。
+## 保护与排错
 
-## 2. 测试与前端配置
+保留原有 CORS、鉴权、20 MiB 请求上限、最多四个并发、180 秒超时、流式转发和重定向拦截。
+固定上游白名单，不接受调用者提供任意上游地址。日志不记录正文或 Key。
+unsupported_model：模型 ID 不在名单中。
+provider_not_configured：对应平台未配置 Key。
+relay_unauthorized：中转密码不一致。
+origin_not_allowed：实际网页 Origin 未列入 ALLOWED_ORIGINS。
+upstream_response：日志包含平台、模型、状态码和请求编号。
 
-先在浏览器打开 https://你的服务名.onrender.com/healthz，等到显示 {"ok":true}。
-这只验证服务启动，不代表 Z.AI 已连通；免费实例冷启动可能需要约一分钟。
-
-在 TeleWindy 新建一个 API 预设，保留原有预设：
-
-| 字段 | 填写 |
-| --- | --- |
-| API URL | https://你的服务名.onrender.com/v1/chat/completions |
-| API Key | RELAY_TOKEN 的值（不是 ZAI_API_KEY） |
-| 模型 | glm-5 |
-| 附加请求体 | 初次测试留空 |
-
-先在空会话中发送 Hello，关闭后台回复接收可单独验证 PWA → Render → Z.AI。
-然后启用原来的后台回复接收，后台 URL 与 APP_TOKEN 保持现有值，后台调用模式选“跟随前端 API Key”。
-这个模式会让现有 Worker 使用 Render URL 和中转密码；无需修改 Worker 代码或部署新的 Worker。
-最后再测试 OC 的完整上下文及长回复。
-
-## 3. 查看结果
-
-- /healthz 成功：仅说明 Render 服务在线。
-- relay_unauthorized：前端 API Key 与 Render RELAY_TOKEN 不一致。
-- origin_not_allowed：把实际网页 Origin 加入 ALLOWED_ORIGINS，用逗号分隔。
-- Render 日志 zai_response 的 status 为 200，聊天实际返回正文：上游调用通过。
-- 日志仍为 405：Render 出口也未解决问题，不要据此购买付费实例。
-- relay_timeout_or_disconnected：请求超时或下游断开；中转上限 180 秒，现有 Worker 上限 200 秒。
-
-免费实例闲置 15 分钟会休眠，先访问 /healthz 唤醒再发送长请求，避免冷启动占用 Worker 超时预算。
-免费服务可能重启或受额度限制；验证稳定后再决定是否需要付费常驻。这里没有配置定时保活。
-聊天内容不落盘、不打印；仅在转发期间存在于内存。中转仅允许固定 Z.AI 地址，不能作为通用代理。
-
-部署文档：https://render.com/docs/deploy-node-express-app
-环境变量：https://render.com/docs/configure-environment-variables
-免费限制：https://render.com/docs/free
+本地验证：在本目录执行 npm test（Node 22）。

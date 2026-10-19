@@ -8,7 +8,7 @@ test('私人中转鉴权、CORS、固定上游与原始错误透传', async () =
   const token = 'test-relay-token-12345678901234567890';
   const calls = [];
   let status = 200;
-  const server = createRelayServer({ apiKey: 'test-zai-key', token,
+  const server = createRelayServer({ apiKey: 'test-zai-key', moonshotApiKey: 'test-moonshot-key', token,
     fetchUpstream: async (url, options) => {
       calls.push({ url, options });
       return new Response(status === 200 ? '{"choices":[{"message":{"content":"Hello"}}]}' : '<html>405</html>',
@@ -40,6 +40,22 @@ test('私人中转鉴权、CORS、固定上游与原始错误透传', async () =
     assert.equal(calls[0].options.headers.Authorization, 'Bearer test-zai-key');
     assert.equal(calls[0].options.redirect, 'manual');
     assert.deepEqual(JSON.parse(calls[0].options.body), body);
+    const listed = await fetch(`${base}/v1/models`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.deepEqual((await listed.json()).data.map(m => m.id),
+      ['glm-5', 'glm-5.1', 'glm-5.2', 'kimi-k3', 'kimi-k2.6', 'kimi-k2.5']);
+    for (const model of ['glm-5.1', 'glm-5.2', 'kimi-k3', 'kimi-k2.6', 'kimi-k2.5']) {
+      const response = await send({ ...body, model });
+      assert.equal(response.status, 200);
+      await response.text();
+      const call = calls.at(-1);
+      const kimi = model.startsWith('kimi-');
+      assert.equal(call.url, kimi ? 'https://api.moonshot.ai/v1/chat/completions' : 'https://api.z.ai/api/paas/v4/chat/completions');
+      assert.equal(call.options.headers.Authorization, kimi ? 'Bearer test-moonshot-key' : 'Bearer test-zai-key');
+      assert.equal(JSON.parse(call.options.body).model, model);
+    }
+    const before = calls.length;
+    assert.equal((await send({ ...body, model: 'https://evil.example' })).status, 400);
+    assert.equal(calls.length, before);
     status = 405;
     const failed = await send(body);
     assert.equal(failed.status, 405);

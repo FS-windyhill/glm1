@@ -4,24 +4,31 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 
-// ★★★★★ Z.AI 私人中转 START ★★★★★
-// 固定上游地址，调用者只能提交聊天参数；真实模型 Key 留在 Render 环境变量里。
-const UPSTREAM_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
+// ★★★★★ 多模型私人中转 START ★★★★★
+// 固定上游地址，调用者只能提交聊天参数；各平台真实模型 Key 留在 Render 环境变量里。
+const PROVIDERS = {
+  zai: { url: 'https://api.z.ai/api/paas/v4/chat/completions', models: ['glm-5', 'glm-5.1', 'glm-5.2'] },
+  moonshot: { url: 'https://api.moonshot.ai/v1/chat/completions', models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.5'] }
+};
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 180000;
 
 export function createRelayServer({
   apiKey = process.env.ZAI_API_KEY,
+  moonshotApiKey = process.env.MOONSHOT_API_KEY,
   token = process.env.RELAY_TOKEN,
   origins = process.env.ALLOWED_ORIGINS || 'https://795799.xyz,https://www.795799.xyz',
   fetchUpstream = fetch
 } = {}) {
-  if (!apiKey || !token || token.length < 32) {
-    throw new Error('请设置 ZAI_API_KEY 和至少 32 字符的 RELAY_TOKEN');
+  if ((!apiKey && !moonshotApiKey) || !token || token.length < 32) {
+    throw new Error('请设置至少一个平台 API Key，以及至少 32 字符的 RELAY_TOKEN');
   }
   const allowedOrigins = new Set(origins.split(',').map(s => s.trim()).filter(Boolean));
   const digest = value => createHash('sha256').update(value).digest();
   const expectedToken = digest(`Bearer ${token}`);
+  const keys = { zai: apiKey, moonshot: moonshotApiKey };
+  const models = Object.entries(PROVIDERS).flatMap(([provider, config]) =>
+    keys[provider] ? config.models.map(id => ({ id, object: 'model', owned_by: provider })) : []);
   let activeRequests = 0;
 
   return createServer(async (req, res) => {
@@ -49,7 +56,7 @@ export function createRelayServer({
       return reply(401, { error: 'relay_unauthorized' });
     }
     if (path === '/v1/models' && req.method === 'GET') {
-      return reply(200, { object: 'list', data: [{ id: 'glm-5', object: 'model', owned_by: 'zai' }] });
+      return reply(200, { object: 'list', data: models });
     }
     if (path !== '/v1/chat/completions' || req.method !== 'POST') {
       res.setHeader('Allow', path === '/v1/models' ? 'GET' : 'POST');
@@ -74,20 +81,24 @@ export function createRelayServer({
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { return reply(400, { error: 'invalid_json' }); }
-      if (!body || body.model !== 'glm-5' || !Array.isArray(body.messages) || !body.messages.length) {
-        return reply(400, { error: 'expected_glm5_and_messages' });
+      if (!body || typeof body.model !== 'string' || !Array.isArray(body.messages) || !body.messages.length) {
+        return reply(400, { error: 'expected_model_and_messages' });
       }
-      const upstream = await fetchUpstream(UPSTREAM_URL, {
+      const entry = Object.entries(PROVIDERS).find(([, config]) => config.models.includes(body.model));
+      if (!entry) return reply(400, { error: 'unsupported_model' });
+      const [provider, config] = entry;
+      if (!keys[provider]) return reply(503, { error: 'provider_not_configured', provider });
+      const upstream = await fetchUpstream(config.url, {
         method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${keys[provider]}`,
           'Content-Type': 'application/json', Accept: 'application/json',
           'Accept-Language': 'en-US,en', 'User-Agent': 'TeleWindy-Relay/1.0'
         },
         body: JSON.stringify(body)
       });
       // ★ 日志仅保留状态与定位编号；聊天正文、请求头和真实 Key 均不打印。
-      console.log(JSON.stringify({ event: 'zai_response', id, status: upstream.status,
+      console.log(JSON.stringify({ event: 'upstream_response', provider, model: body.model, id, status: upstream.status,
         contentType: upstream.headers.get('content-type'), cfRay: upstream.headers.get('cf-ray') }));
       if (upstream.status >= 300 && upstream.status < 400) {
         await upstream.body?.cancel();
@@ -115,6 +126,6 @@ export function createRelayServer({
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createRelayServer();
-  server.listen(Number(process.env.PORT || 10000), '0.0.0.0', () => console.log('zai_relay_ready'));
+  server.listen(Number(process.env.PORT || 10000), '0.0.0.0', () => console.log('multi_model_relay_ready'));
 }
-// ★★★★★ Z.AI 私人中转 END ★★★★★
+// ★★★★★ 多模型私人中转 END ★★★★★
