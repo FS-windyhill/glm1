@@ -6,9 +6,15 @@ import { pathToFileURL } from 'node:url';
 
 // ★★★★★ 多模型私人中转 START ★★★★★
 // 固定上游地址，调用者只能提交聊天参数；各平台真实模型 Key 留在 Render 环境变量里。
+// ★ 版本名：每次改模型名单或逻辑就换一个新号，部署后在日志和 /healthz 里核对是否生效。
+// 1.1.0：增加 glm-5.3-flash、kimi-k2.7-code，移除已下线的 kimi-k2.5。
+export const RELAY_VERSION = '1.1.0';
 const PROVIDERS = {
-  zai: { url: 'https://api.z.ai/api/paas/v4/chat/completions', models: ['glm-5', 'glm-5.1', 'glm-5.2'] },
-  moonshot: { url: 'https://api.moonshot.ai/v1/chat/completions', models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.5'] }
+  // ★ 新增模型：把厂商文档里的 Model Code 原样追加到对应数组，然后重跑 npm test。
+  zai: { url: 'https://api.z.ai/api/paas/v4/chat/completions',
+    models: ['glm-5', 'glm-5.1', 'glm-5.2', 'glm-5.3-flash'] },
+  moonshot: { url: 'https://api.moonshot.ai/v1/chat/completions',
+    models: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'] }
 };
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 180000;
@@ -31,7 +37,7 @@ export function createRelayServer({
     keys[provider] ? config.models.map(id => ({ id, object: 'model', owned_by: provider })) : []);
   let activeRequests = 0;
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const reply = (status, value) => {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(value));
@@ -40,7 +46,7 @@ export function createRelayServer({
     res.setHeader('Vary', 'Origin');
     const path = new URL(req.url, 'http://relay.local').pathname;
     // ★ 健康检查仅确认进程可用，不调用 GLM，不消耗模型额度。
-    if (path === '/healthz' && req.method === 'GET') return reply(200, { ok: true });
+    if (path === '/healthz' && req.method === 'GET') return reply(200, { ok: true, version: RELAY_VERSION });
     const origin = req.headers.origin;
     if (origin && !allowedOrigins.has(origin)) return reply(403, { error: 'origin_not_allowed' });
     if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
@@ -122,10 +128,15 @@ export function createRelayServer({
       activeRequests--;
     }
   });
+  // ★ 自检用：日志里的版本和模型名单跟实际路由读的是同一份配置，避免"以为上线了其实没有"。
+  server.relayInfo = { version: RELAY_VERSION, models: models.map(model => model.id) };
+  return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createRelayServer();
-  server.listen(Number(process.env.PORT || 10000), '0.0.0.0', () => console.log('multi_model_relay_ready'));
+  server.listen(Number(process.env.PORT || 10000), '0.0.0.0', () => console.log(JSON.stringify({
+    event: 'multi_model_relay_ready', version: server.relayInfo.version, models: server.relayInfo.models
+  })));
 }
 // ★★★★★ 多模型私人中转 END ★★★★★

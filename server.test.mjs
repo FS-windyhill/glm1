@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { createRelayServer } from './server.mjs';
+import { createRelayServer, RELAY_VERSION } from './server.mjs';
 
 // ★ 本地假上游验证鉴权边界和响应转发，不调用真实 API，也不消耗模型额度。
 test('私人中转鉴权、CORS、固定上游与原始错误透传', async () => {
@@ -23,7 +23,10 @@ test('私人中转鉴权、CORS、固定上游与原始错误透传', async () =
     body: JSON.stringify(body)
   });
   try {
-    assert.equal((await fetch(`${base}/healthz`)).status, 200);
+    // ★ 健康检查必须回带版本名，部署后靠它确认新代码已上线。
+    const health = await fetch(`${base}/healthz`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).version, RELAY_VERSION);
     assert.equal((await fetch(`${base}/v1/models`)).status, 401);
     const preflight = await fetch(`${base}/v1/chat/completions`, { method: 'OPTIONS',
       headers: { Origin: 'https://www.795799.xyz' } });
@@ -42,8 +45,8 @@ test('私人中转鉴权、CORS、固定上游与原始错误透传', async () =
     assert.deepEqual(JSON.parse(calls[0].options.body), body);
     const listed = await fetch(`${base}/v1/models`, { headers: { Authorization: `Bearer ${token}` } });
     assert.deepEqual((await listed.json()).data.map(m => m.id),
-      ['glm-5', 'glm-5.1', 'glm-5.2', 'kimi-k3', 'kimi-k2.6', 'kimi-k2.5']);
-    for (const model of ['glm-5.1', 'glm-5.2', 'kimi-k3', 'kimi-k2.6', 'kimi-k2.5']) {
+      ['glm-5', 'glm-5.1', 'glm-5.2', 'glm-5.3-flash', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']);
+    for (const model of ['glm-5.1', 'glm-5.2', 'glm-5.3-flash', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6']) {
       const response = await send({ ...body, model });
       assert.equal(response.status, 200);
       await response.text();
